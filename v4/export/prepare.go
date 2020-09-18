@@ -47,7 +47,7 @@ const (
 			{{template "objectName" .}}-schema
 		{{- end -}}
 		{{- define "data" -}}
-			{{template "objectName" .}}.{{.Index}}
+			{{template "objectName" .}}.{{.ChunkIndex}}.{{.Index}}
 		{{- end -}}
 	`
 

@@ -110,9 +110,10 @@ func writeMetaToFile(target, metaSQL, path string) error {
 type CSVWriter struct{ SimpleWriter }
 
 type outputFileNamer struct {
-	Index int
-	DB    string
-	Table string
+	ChunkIndex int
+	Index      int
+	DB         string
+	Table      string
 }
 
 type csvOption struct {
@@ -123,9 +124,10 @@ type csvOption struct {
 
 func newOutputFileNamer(ir TableDataIR) *outputFileNamer {
 	return &outputFileNamer{
-		Index: ir.ChunkIndex(),
-		DB:    ir.DatabaseName(),
-		Table: ir.TableName(),
+		ChunkIndex: ir.ChunkIndex(),
+		Index:      1,
+		DB:         ir.DatabaseName(),
+		Table:      ir.TableName(),
 	}
 }
 
@@ -164,7 +166,7 @@ func (f CSVWriter) WriteTableData(ctx context.Context, ir TableDataIR) error {
 	for {
 		filePath := path.Join(f.cfg.OutputDirPath, fileName)
 		fileWriter, tearDown := buildInterceptFileWriter(filePath)
-		err := WriteInsertInCsv(ctx, chunksIter, fileWriter, f.cfg.NoHeader, opt, f.cfg.FileSize)
+		err := WriteInsertInCsv(ctx, chunksIter, fileWriter, f.cfg.NoHeader, opt, f.cfg.FileSize, f.cfg.RowsLimit)
 		tearDown()
 		if err != nil {
 			return err
@@ -174,7 +176,7 @@ func (f CSVWriter) WriteTableData(ctx context.Context, ir TableDataIR) error {
 			break
 		}
 
-		if f.cfg.FileSize == UnspecifiedSize {
+		if f.cfg.FileSize == UnspecifiedSize && f.cfg.RowsLimit == UnspecifiedSize {
 			break
 		}
 		fileName, err = namer.NextName(f.cfg.OutputFileTemplate)

@@ -1,7 +1,6 @@
 package export
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
 	"fmt"
@@ -167,6 +166,9 @@ func splitTableDataIntoChunksByRegion(
 		errCh <- errors.Errorf("can't split chunks by region info for database %s except TiDB", serverTypeString[conf.ServerInfo.ServerType])
 		return
 	}
+	if index == "" {
+		index = ROW_ID_IDX
+	}
 
 	if index == PRIMARY {
 		existRowID, err := SelectTiDBRowID(db, dbName, tableName)
@@ -191,7 +193,9 @@ func splitTableDataIntoChunksByRegion(
 		errCh <- errors.WithMessage(err, "fail to generate whereConditions")
 		return
 	}
-	log.Debug("getWhereConditions", zap.Strings("whereConditions", whereConditions))
+	for _, whereCondition := range whereConditions {
+		log.Debug("getWhereConditions", zap.String("whereCondition", whereCondition))
+	}
 
 	if len(whereConditions) <= 1 {
 		linear <- struct{}{}
@@ -242,20 +246,17 @@ LOOP:
 	close(tableDataIRCh)
 }
 
-func tryDecodeRowKey(ctx context.Context, db *sql.Conn, key string) ([]string, error) {
-	return DecodeKey(key)
-}
-
 func getWhereConditions(ctx context.Context, db *sql.Conn, startKeys []string, counts []uint64, dbName, tableName, index string) ([]string, error) {
 	whereConditions := make([]string, 0)
 	var (
-		columnName []string
-		dataType   []string
+		columnName   []string
+		dataType     []string
+		dataUnsigned []bool
 	)
 	if index != ROW_ID_IDX {
 		rows, err := db.QueryContext(ctx,
 			`
-SELECT s.COLUMN_NAME, t.DATA_TYPE
+SELECT s.COLUMN_NAME, t.DATA_TYPE , INSTR(LOWER(COLUMN_TYPE), 'unsigned')>0 as IS_UNSIGNED
 FROM INFORMATION_SCHEMA.TIDB_INDEXES s,
      INFORMATION_SCHEMA.COLUMNS t
 WHERE s.TABLE_SCHEMA = t.TABLE_SCHEMA
@@ -271,13 +272,15 @@ ORDER BY s.SEQ_IN_INDEX;
 		}
 		defer rows.Close()
 		var col, dType string
+		var dUnsigned bool
 		for rows.Next() {
-			err = rows.Scan(&col, &dType)
+			err = rows.Scan(&col, &dType, &dUnsigned)
 			if err != nil {
 				return nil, err
 			}
 			columnName = append(columnName, fmt.Sprintf("`%s`", escapeString(col)))
 			dataType = append(dataType, dType)
+			dataUnsigned = append(dataUnsigned, dUnsigned)
 		}
 	} else {
 		existRowID, err := SelectTiDBRowID(db, dbName, tableName)
@@ -287,6 +290,7 @@ ORDER BY s.SEQ_IN_INDEX;
 		if existRowID {
 			columnName = []string{"_tidb_rowid"}
 			dataType = []string{"int"}
+			dataUnsigned = []bool{false}
 		} else {
 			pk, err := GetPrimaryKeyName(db, dbName, tableName)
 			if err != nil {
@@ -294,12 +298,39 @@ ORDER BY s.SEQ_IN_INDEX;
 			}
 			columnName = []string{pk}
 			dataType = []string{"int"}
+
+			sql := `SELECT INSTR(LOWER(COLUMN_TYPE), 'unsigned')>0 as IS_UNSIGNED
+FROM INFORMATION_SCHEMA.COLUMNS t
+WHERE t.TABLE_SCHEMA = ?
+  AND t.TABLE_NAME = ?
+AND t.COLUMN_NAME = ?;
+`
+			rows, err := db.QueryContext(ctx, sql, dbName, tableName, pk)
+
+			if err != nil {
+				return nil, err
+			}
+			defer rows.Close()
+
+			var dUnsigned bool
+			var rowsLen int
+			for rows.Next() {
+				err = rows.Scan(&dUnsigned)
+				if err != nil {
+					return nil, err
+				}
+				rowsLen++
+			}
+			if rowsLen != 1 {
+				return nil, errors.Errorf("error to get type of primary key %s.%s.%s", dbName, tableName, pk)
+			}
+			dataUnsigned = []bool{dUnsigned}
 		}
 	}
 	if len(columnName) == 0 || len(dataType) == 0 {
 		return nil, errors.Errorf("can't found index to split chunk, `%s`.`%s`.`%s`", dbName, tableName, index)
 	}
-	log.Debug("found index info", zap.String("index", index), zap.Strings("columnName", columnName), zap.Strings("dataType", dataType))
+	log.Debug("found index info", zap.String("index", index), zap.Strings("columnName", columnName), zap.Strings("dataType", dataType), zap.Bools("unsigned", dataUnsigned))
 
 	lastStartKey := ""
 	field := strings.Join(columnName, ",")
@@ -319,22 +350,15 @@ ORDER BY s.SEQ_IN_INDEX;
 		whereConditions = append(whereConditions, where)
 	}
 	for i := 1; i < len(startKeys); i++ {
-		keys, err := tryDecodeRowKey(ctx, db, startKeys[i])
+		keys, err := DecodeKey(startKeys[i], dataType, dataUnsigned)
 		if err != nil {
 			return nil, err
 		}
 		log.Debug("decode keys", zap.Strings("columnName", columnName), zap.Strings("keys", keys))
-		if len(dataType) != len(keys) {
+		if len(dataType) > len(keys) {
 			continue
 		}
-		var bf bytes.Buffer
-		for j := range keys {
-			if _, ok := dataTypeStringMap[strings.ToUpper(dataType[j])]; ok {
-				bf.Reset()
-				escape([]byte(keys[j]), &bf, nil)
-				keys[j] = fmt.Sprintf("'%s'", bf.String())
-			}
-		}
+		keys = keys[:len(dataType)]
 		generateWhereCondition(strings.Join(keys, ","))
 	}
 	generateWhereCondition("")

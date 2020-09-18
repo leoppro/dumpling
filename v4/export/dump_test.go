@@ -23,10 +23,11 @@ func (s *testDumpSuite) TestDump(c *C) {
 		OutputDirPath: "/Users/leoppro/dumpling",
 		SchameName:    "test",
 		TableName:     "order_line",
-		IndexName:     "PRIMARY",
+		IndexName:     "",
 		CsvSeparator:  ",",
 		CsvDelimiter:  "",
 		NoHeader:      true,
+		RowsLimit:     100000,
 	})
 	c.Assert(err, IsNil)
 }

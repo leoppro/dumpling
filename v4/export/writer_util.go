@@ -27,14 +27,16 @@ type writerPipe struct {
 
 	currentFileSize      uint64
 	currentStatementSize uint64
+	currentRows          uint64
 
 	fileSizeLimit      uint64
 	statementSizeLimit uint64
+	rowsLimit          uint64
 
 	w io.Writer
 }
 
-func newWriterPipe(w io.Writer, fileSizeLimit, statementSizeLimit uint64) *writerPipe {
+func newWriterPipe(w io.Writer, fileSizeLimit, statementSizeLimit, rowsLimit uint64) *writerPipe {
 	return &writerPipe{
 		input:  make(chan *bytes.Buffer, 8),
 		closed: make(chan struct{}),
@@ -43,8 +45,10 @@ func newWriterPipe(w io.Writer, fileSizeLimit, statementSizeLimit uint64) *write
 
 		currentFileSize:      0,
 		currentStatementSize: 0,
+		currentRows:          0,
 		fileSizeLimit:        fileSizeLimit,
 		statementSizeLimit:   statementSizeLimit,
+		rowsLimit:            rowsLimit,
 	}
 }
 
@@ -88,11 +92,12 @@ func (b *writerPipe) Error() error {
 }
 
 func (b *writerPipe) ShouldSwitchFile() bool {
-	return b.fileSizeLimit != UnspecifiedSize && b.currentFileSize >= b.fileSizeLimit
+	return b.fileSizeLimit != UnspecifiedSize && b.currentFileSize >= b.fileSizeLimit ||
+		b.rowsLimit != UnspecifiedSize && b.currentRows >= b.rowsLimit
 }
 
 func (b *writerPipe) ShouldSwitchStatement() bool {
-	return (b.fileSizeLimit != UnspecifiedSize && b.currentFileSize >= b.fileSizeLimit) ||
+	return b.ShouldSwitchFile() ||
 		(b.statementSizeLimit != UnspecifiedSize && b.currentStatementSize >= b.statementSizeLimit)
 }
 
@@ -125,7 +130,7 @@ func WriteInsert(pCtx context.Context, tblIR TableDataIR, w io.Writer, fileSizeL
 		bf.Grow(lengthLimit - bfCap)
 	}
 
-	wp := newWriterPipe(w, fileSizeLimit, statementSizeLimit)
+	wp := newWriterPipe(w, fileSizeLimit, statementSizeLimit, 0)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
@@ -226,7 +231,7 @@ func WriteInsert(pCtx context.Context, tblIR TableDataIR, w io.Writer, fileSizeL
 	return wp.Error()
 }
 
-func WriteInsertInCsv(pCtx context.Context, tblIR TableDataIR, w io.Writer, noHeader bool, opt *csvOption, fileSizeLimit uint64) error {
+func WriteInsertInCsv(pCtx context.Context, tblIR TableDataIR, w io.Writer, noHeader bool, opt *csvOption, fileSizeLimit uint64, rowsLimit uint64) error {
 	fileRowIter := tblIR.Rows()
 	if !fileRowIter.HasNext() {
 		return nil
@@ -237,7 +242,7 @@ func WriteInsertInCsv(pCtx context.Context, tblIR TableDataIR, w io.Writer, noHe
 		bf.Grow(lengthLimit - bfCap)
 	}
 
-	wp := newWriterPipe(w, fileSizeLimit, UnspecifiedSize)
+	wp := newWriterPipe(w, fileSizeLimit, UnspecifiedSize, rowsLimit)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
@@ -268,6 +273,7 @@ func WriteInsertInCsv(pCtx context.Context, tblIR TableDataIR, w io.Writer, noHe
 			}
 		}
 		bf.WriteByte('\n')
+		wp.currentRows++
 	}
 	wp.currentFileSize += uint64(bf.Len())
 
@@ -283,6 +289,7 @@ func WriteInsertInCsv(pCtx context.Context, tblIR TableDataIR, w io.Writer, noHe
 		wp.currentFileSize += uint64(bf.Len()-lastBfSize) + 1 // 1 is for "\n"
 
 		bf.WriteByte('\n')
+		wp.currentRows++
 		if bf.Len() >= lengthLimit {
 			wp.input <- bf
 			bf = pool.Get().(*bytes.Buffer)

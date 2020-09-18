@@ -66,6 +66,7 @@ type Config struct {
 	SchameName      string
 	TableName       string
 	IndexName       string
+	RowsLimit       uint64
 }
 
 func DefaultConfig() *Config {

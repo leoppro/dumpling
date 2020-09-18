@@ -15,7 +15,7 @@ type codecSuite struct{}
 
 func (s *codecSuite) TestCodec(c *C) {
 	key := "7480000000000000FF395F698000000000FF0000010380000000FF0000000403800000FF0000000007038000FF0000000004ED0380FF0000000000000A00FE"
-	keys, err := DecodeKey(key)
+	keys, err := DecodeKey(key, nil, nil)
 	c.Assert(err, IsNil)
 	c.Assert(keys, DeepEquals, []string{"4", "7", "1261", "10"})
 }

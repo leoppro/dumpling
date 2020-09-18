@@ -5,10 +5,13 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"github.com/pingcap/dumpling/v4/log"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util/codec"
+	"go.uber.org/zap"
 	"strconv"
+	"strings"
 )
 
 var (
@@ -63,7 +66,7 @@ func DecodeCmpUintToInt(u uint64) int64 {
 	return int64(u ^ signMask)
 }
 
-func DecodeKey(key string) ([]string, error) {
+func DecodeKey(key string, dataType []string, unsigned []bool) ([]string, error) {
 	keyBytes, err := hex.DecodeString(key)
 	if err != nil {
 		return nil, errors.Trace(err)
@@ -81,23 +84,27 @@ func DecodeKey(key string) ([]string, error) {
 	}
 	switch {
 	case bytes.HasPrefix(keyBytes, recordPrefix):
-		//rowKV, err := m.unmarshalRowKVEntry(tableInfo, key, raw.Value, raw.OldValue, baseInfo)
-		//if err != nil {
-		//	return nil, errors.Trace(err)
-		//}
-		//if rowKV == nil {
-		//	return nil, nil
-		//}
-		//return m.mountRowKVEntry(tableInfo, rowKV, raw.ApproximateSize())
-		panic("unreachable")
+		_, recordID, err := decodeRecordID(keyBytes)
+		if err != nil {
+			return nil, errors.Trace(err)
+		}
+		if unsigned[0] {
+			return []string{strconv.FormatUint(uint64(recordID), 10)}, nil
+		} else {
+			return []string{strconv.FormatInt(recordID, 10)}, nil
+		}
 	case bytes.HasPrefix(keyBytes, indexPrefix):
 		_, indexValue, err := decodeIndexKey(keyBytes)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
+		log.Debug("index value", zap.Stringer("value", datums(indexValue)))
+		if len(indexValue) > len(dataType) {
+			indexValue = indexValue[:len(dataType)]
+		}
 		keys := make([]string, len(indexValue))
 		for i, v := range indexValue {
-			keys[i] = datum2String(v)
+			keys[i] = datum2String(v, dataType[i], unsigned[i])
 		}
 		return keys, nil
 	default:
@@ -105,13 +112,40 @@ func DecodeKey(key string) ([]string, error) {
 	}
 }
 
-func datum2String(d types.Datum) string {
+type datums []types.Datum
+
+func (ds datums) String() string {
+	bs := new(strings.Builder)
+	for _, d := range ds {
+		bs.WriteString(d.String())
+		bs.WriteRune(',')
+		bs.WriteRune(' ')
+	}
+	return bs.String()
+}
+
+func decodeRecordID(key []byte) (rest []byte, recordID int64, err error) {
+	if len(key) < prefixRecordIDLen || !bytes.HasPrefix(key, recordPrefix) {
+		return nil, 0, errors.Errorf("invalid record key - %q", key)
+	}
+	key = key[recordPrefixLen:]
+	rest, recordID, err = codec.DecodeInt(key)
+	if err != nil {
+		return nil, 0, errors.Wrap(err, "invalid record key")
+	}
+	return
+}
+
+func datum2String(d types.Datum, dataType string, unsigned bool) string {
 	switch d.Kind() {
 	case types.KindNull:
 		return "NULL"
 	case types.KindInt64:
 		return strconv.FormatInt(d.GetInt64(), 10)
 	case types.KindUint64:
+		switch dataType {
+
+		}
 		return strconv.FormatUint(d.GetUint64(), 10)
 	case types.KindFloat32, types.KindFloat64:
 		return strconv.FormatFloat(d.GetFloat64(), 'G', -1, 64)
