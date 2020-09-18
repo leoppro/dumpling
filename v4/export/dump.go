@@ -179,12 +179,12 @@ func Dump(pCtx context.Context, conf *Config) (err error) {
 	}
 
 	if conf.Consistency != "lock" {
-		conn := connectPool.getConn()
-		if err = prepareTableListToDump(conf, conn); err != nil {
-			connectPool.releaseConn(conn)
-			return err
-		}
-		connectPool.releaseConn(conn)
+		//conn := connectPool.getConn()
+		//if err = prepareTableListToDump(conf, conn); err != nil {
+		//	connectPool.releaseConn(conn)
+		//	return err
+		//}
+		//connectPool.releaseConn(conn)
 	}
 
 	if err = conCtrl.TearDown(ctx); err != nil {
@@ -205,62 +205,36 @@ func Dump(pCtx context.Context, conf *Config) (err error) {
 		writer = CSVWriter{SimpleWriter: simpleWriter}
 	}
 
-	if conf.Sql == "" {
-		if err = dumpDatabases(ctx, conf, connectPool, writer); err != nil {
-			return err
-		}
-	} else {
-		if err = dumpSql(ctx, conf, connectPool, writer); err != nil {
-			return err
-		}
-	}
-
-	m.recordFinishTime(time.Now())
-	return nil
-}
-
-func dumpDatabases(ctx context.Context, conf *Config, connectPool *connectionsPool, writer Writer) error {
-	allTables := conf.Tables
 	var g errgroup.Group
-	for dbName, tables := range allTables {
-		conn := connectPool.getConn()
-		createDatabaseSQL, err := ShowCreateDatabase(conn, dbName)
-		connectPool.releaseConn(conn)
-		if err != nil {
-			return err
-		}
-		if err := writer.WriteDatabaseMeta(ctx, dbName, createDatabaseSQL); err != nil {
-			return err
-		}
 
-		if len(tables) == 0 {
-			continue
-		}
-		for _, table := range tables {
-			table := table
+	table := &TableInfo{
+		Name: conf.TableName,
+		Type: TableTypeBase,
+	}
+	conn := connectPool.getConn()
+	tableDataIRArray, err := dumpTable(ctx, conf, conn, conf.SchameName, table, conf.IndexName, writer)
+	connectPool.releaseConn(conn)
+	if err != nil {
+		return err
+	}
+	for _, tableIR := range tableDataIRArray {
+		tableIR := tableIR
+		g.Go(func() error {
 			conn := connectPool.getConn()
-			tableDataIRArray, err := dumpTable(ctx, conf, conn, dbName, table, writer)
-			connectPool.releaseConn(conn)
+			defer connectPool.releaseConn(conn)
+			err := tableIR.Start(ctx, conn)
 			if err != nil {
 				return err
 			}
-			for _, tableIR := range tableDataIRArray {
-				tableIR := tableIR
-				g.Go(func() error {
-					conn := connectPool.getConn()
-					defer connectPool.releaseConn(conn)
-					err := tableIR.Start(ctx, conn)
-					if err != nil {
-						return err
-					}
-					return writer.WriteTableData(ctx, tableIR)
-				})
-			}
-		}
+			return writer.WriteTableData(ctx, tableIR)
+		})
 	}
+
 	if err := g.Wait(); err != nil {
 		return err
 	}
+
+	m.recordFinishTime(time.Now())
 	return nil
 }
 
@@ -298,7 +272,7 @@ func dumpSql(ctx context.Context, conf *Config, connectPool *connectionsPool, wr
 	return writer.WriteTableData(ctx, tableIR)
 }
 
-func dumpTable(ctx context.Context, conf *Config, db *sql.Conn, dbName string, table *TableInfo, writer Writer) ([]TableDataIR, error) {
+func dumpTable(ctx context.Context, conf *Config, db *sql.Conn, dbName string, table *TableInfo, index string, writer Writer) ([]TableDataIR, error) {
 	tableName := table.Name
 	if !conf.NoSchemas {
 		if table.Type == TableTypeView {
@@ -322,21 +296,19 @@ func dumpTable(ctx context.Context, conf *Config, db *sql.Conn, dbName string, t
 		return nil, nil
 	}
 
-	if conf.Rows != UnspecifiedSize {
-		finished, chunksIterArray, err := concurrentDumpTable(ctx, conf, db, dbName, tableName)
-		if err != nil || finished {
-			return chunksIterArray, err
-		}
+	finished, chunksIterArray, err := concurrentDumpTable(ctx, conf, db, dbName, tableName, index)
+	log.Debug("concurrentDumpTable", zap.Bool("finished", finished), zap.Any("chunksIterArray", chunksIterArray), zap.Error(err))
+	if err != nil || finished {
+		return chunksIterArray, err
 	}
 	tableIR, err := SelectAllFromTable(conf, db, dbName, tableName)
 	if err != nil {
 		return nil, err
 	}
-
 	return []TableDataIR{tableIR}, nil
 }
 
-func concurrentDumpTable(ctx context.Context, conf *Config, db *sql.Conn, dbName string, tableName string) (bool, []TableDataIR, error) {
+func concurrentDumpTable(ctx context.Context, conf *Config, db *sql.Conn, dbName string, tableName, index string) (bool, []TableDataIR, error) {
 	// try dump table concurrently by split table to chunks
 	chunksIterCh := make(chan TableDataIR, defaultDumpThreads)
 	errCh := make(chan error, defaultDumpThreads)
@@ -347,7 +319,12 @@ func concurrentDumpTable(ctx context.Context, conf *Config, db *sql.Conn, dbName
 	var g errgroup.Group
 	chunksIterArray := make([]TableDataIR, 0)
 	g.Go(func() error {
-		splitTableDataIntoChunks(ctx1, chunksIterCh, errCh, linear, dbName, tableName, db, conf)
+		splitTableDataIntoChunksByRegion(
+			ctx1,
+			chunksIterCh,
+			errCh,
+			linear,
+			dbName, tableName, index, db, conf)
 		return nil
 	})
 

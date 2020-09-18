@@ -63,6 +63,9 @@ type Config struct {
 	SessionParams      map[string]interface{}
 
 	PosAfterConnect bool
+	SchameName      string
+	TableName       string
+	IndexName       string
 }
 
 func DefaultConfig() *Config {

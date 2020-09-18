@@ -5,13 +5,11 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"strconv"
+	"github.com/pingcap/dumpling/v4/log"
+	"go.uber.org/zap"
 	"strings"
 
 	"github.com/pkg/errors"
-	"go.uber.org/zap"
-
-	"github.com/pingcap/dumpling/v4/log"
 )
 
 const (
@@ -159,157 +157,42 @@ func (td *tableData) EscapeBackSlash() bool {
 	return td.escapeBackslash
 }
 
-func splitTableDataIntoChunks(
-	ctx context.Context,
-	tableDataIRCh chan TableDataIR,
-	errCh chan error,
-	linear chan struct{},
-	dbName, tableName string, db *sql.Conn, conf *Config) {
-	if conf.ChunkByRegion {
-		splitTableDataIntoChunksByRegion(
-			ctx,
-			tableDataIRCh,
-			errCh,
-			linear,
-			dbName, tableName, db, conf)
-		return
-	}
-
-	field, err := pickupPossibleField(dbName, tableName, db, conf)
-	if err != nil {
-		errCh <- withStack(err)
-		return
-	}
-	if field == "" {
-		// skip split chunk logic if not found proper field
-		log.Debug("skip concurrent dump due to no proper field", zap.String("field", field))
-		linear <- struct{}{}
-		return
-	}
-
-	query := fmt.Sprintf("SELECT MIN(`%s`),MAX(`%s`) FROM `%s`.`%s` ",
-		escapeString(field), escapeString(field), escapeString(dbName), escapeString(tableName))
-	if conf.Where != "" {
-		query = fmt.Sprintf("%s WHERE %s", query, conf.Where)
-	}
-	log.Debug("split chunks", zap.String("query", query))
-
-	var smin sql.NullString
-	var smax sql.NullString
-	row := db.QueryRowContext(ctx, query)
-	err = row.Scan(&smin, &smax)
-	if err != nil {
-		log.Error("split chunks - get max min failed", zap.String("query", query), zap.Error(err))
-		errCh <- withStack(err)
-		return
-	}
-	if !smax.Valid || !smin.Valid {
-		// found no data
-		log.Warn("no data to dump", zap.String("schema", dbName), zap.String("table", tableName))
-		close(tableDataIRCh)
-		return
-	}
-
-	var max uint64
-	var min uint64
-	if max, err = strconv.ParseUint(smax.String, 10, 64); err != nil {
-		errCh <- errors.WithMessagef(err, "fail to convert max value %s in query %s", smax.String, query)
-		return
-	}
-	if min, err = strconv.ParseUint(smin.String, 10, 64); err != nil {
-		errCh <- errors.WithMessagef(err, "fail to convert min value %s in query %s", smin.String, query)
-		return
-	}
-
-	count := estimateCount(dbName, tableName, db, field, conf)
-	log.Info("get estimated rows count", zap.Uint64("estimateCount", count))
-	if count < conf.Rows {
-		// skip chunk logic if estimates are low
-		log.Debug("skip concurrent dump due to estimate count < rows",
-			zap.Uint64("estimate count", count),
-			zap.Uint64("conf.rows", conf.Rows),
-		)
-		linear <- struct{}{}
-		return
-	}
-
-	// every chunk would have eventual adjustments
-	estimatedChunks := count / conf.Rows
-	estimatedStep := (max-min)/estimatedChunks + 1
-	cutoff := min
-
-	selectedField, err := buildSelectField(db, dbName, tableName, conf.CompleteInsert)
-	if err != nil {
-		errCh <- withStack(err)
-		return
-	}
-
-	colTypes, err := GetColumnTypes(db, selectedField, dbName, tableName)
-	if err != nil {
-		errCh <- withStack(err)
-		return
-	}
-	orderByClause, err := buildOrderByClause(conf, db, dbName, tableName)
-	if err != nil {
-		errCh <- withStack(err)
-		return
-	}
-
-	chunkIndex := 0
-	nullValueCondition := fmt.Sprintf("`%s` IS NULL OR ", escapeString(field))
-LOOP:
-	for cutoff <= max {
-		chunkIndex += 1
-		where := fmt.Sprintf("%s(`%s` >= %d AND `%s` < %d)", nullValueCondition, escapeString(field), cutoff, escapeString(field), cutoff+estimatedStep)
-		query = buildSelectQuery(dbName, tableName, selectedField, buildWhereCondition(conf, where), orderByClause)
-		if len(nullValueCondition) > 0 {
-			nullValueCondition = ""
-		}
-
-		td := &tableData{
-			database:        dbName,
-			table:           tableName,
-			query:           query,
-			chunkIndex:      chunkIndex,
-			colTypes:        colTypes,
-			selectedField:   selectedField,
-			escapeBackslash: conf.EscapeBackslash,
-			specCmts: []string{
-				"/*!40101 SET NAMES binary*/;",
-			},
-		}
-		cutoff += estimatedStep
-		select {
-		case <-ctx.Done():
-			break LOOP
-		case tableDataIRCh <- td:
-		}
-	}
-	close(tableDataIRCh)
-}
-
 func splitTableDataIntoChunksByRegion(
 	ctx context.Context,
 	tableDataIRCh chan TableDataIR,
 	errCh chan error,
 	linear chan struct{},
-	dbName, tableName string, db *sql.Conn, conf *Config) {
+	dbName, tableName, index string, db *sql.Conn, conf *Config) {
 	if conf.ServerInfo.ServerType != ServerTypeTiDB {
 		errCh <- errors.Errorf("can't split chunks by region info for database %s except TiDB", serverTypeString[conf.ServerInfo.ServerType])
 		return
 	}
 
-	startKeys, estimatedCounts, err := getTableRegionInfo(ctx, db, dbName, tableName)
+	if index == PRIMARY {
+		existRowID, err := SelectTiDBRowID(db, dbName, tableName)
+		if err != nil {
+			errCh <- errors.Wrap(err, "can't selete tidb row id")
+			return
+		}
+		if !existRowID {
+			index = ROW_ID_IDX
+		}
+	}
+
+	startKeys, estimatedCounts, err := getTableRegionInfo(ctx, db, dbName, tableName, index)
 	if err != nil {
 		errCh <- errors.WithMessage(err, "fail to get TiDB table regions info")
 		return
 	}
+	log.Debug("getTableRegionInfo", zap.Strings("startKeys", startKeys), zap.Uint64s("counts", estimatedCounts))
 
-	whereConditions, err := getWhereConditions(ctx, db, startKeys, estimatedCounts, conf.Rows, dbName, tableName)
+	whereConditions, err := getWhereConditions(ctx, db, startKeys, estimatedCounts, dbName, tableName, index)
 	if err != nil {
 		errCh <- errors.WithMessage(err, "fail to generate whereConditions")
 		return
 	}
+	log.Debug("getWhereConditions", zap.Strings("whereConditions", whereConditions))
+
 	if len(whereConditions) <= 1 {
 		linear <- struct{}{}
 		return
@@ -360,59 +243,65 @@ LOOP:
 }
 
 func tryDecodeRowKey(ctx context.Context, db *sql.Conn, key string) ([]string, error) {
-	var (
-		decodedRowKey string
-		p             int
-	)
-	row := db.QueryRowContext(ctx, fmt.Sprintf("select tidb_decode_key('%s')", key))
-	err := row.Scan(&decodedRowKey)
-	if err != nil {
-		return nil, err
-	}
-	if p = strings.Index(decodedRowKey, clusterHandle); p != -1 {
-		p += len(clusterHandle)
-		decodedRowKey = decodedRowKey[p:]
-		if len(decodedRowKey) <= 2 {
-			return nil, nil
-		}
-		keys := strings.Split(decodedRowKey[1:len(decodedRowKey)-1], ", ")
-		return keys, nil
-	} else if p = strings.Index(decodedRowKey, tidbRowID); p != -1 {
-		p += len(tidbRowID)
-		return []string{decodedRowKey[p:]}, nil
-	} else if p = strings.Index(decodedRowKey, indexID); p != -1 {
-		return nil, nil
-	}
-	return []string{"_tidb_rowid"}, nil
+	return DecodeKey(key)
 }
 
-func getWhereConditions(ctx context.Context, db *sql.Conn, startKeys []string, counts []uint64, confRows uint64, dbName, tableName string) ([]string, error) {
+func getWhereConditions(ctx context.Context, db *sql.Conn, startKeys []string, counts []uint64, dbName, tableName, index string) ([]string, error) {
 	whereConditions := make([]string, 0)
 	var (
-		cutoff     uint64 = 0
 		columnName []string
 		dataType   []string
 	)
-	lastStartKey := ""
-	rows, err := db.QueryContext(ctx, "SELECT s.COLUMN_NAME,t.DATA_TYPE FROM INFORMATION_SCHEMA.TIDB_INDEXES s, INFORMATION_SCHEMA.COLUMNS t WHERE s.KEY_NAME = 'PRIMARY' and s.TABLE_SCHEMA=t.TABLE_SCHEMA AND s.TABLE_NAME=t.TABLE_NAME AND s.COLUMN_NAME = t.COLUMN_NAME AND s.TABLE_SCHEMA=? AND s.TABLE_NAME=? ORDER BY s.SEQ_IN_INDEX;", dbName, tableName)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var col, dType string
-	for rows.Next() {
-		err = rows.Scan(&col, &dType)
+	if index != ROW_ID_IDX {
+		rows, err := db.QueryContext(ctx,
+			`
+SELECT s.COLUMN_NAME, t.DATA_TYPE
+FROM INFORMATION_SCHEMA.TIDB_INDEXES s,
+     INFORMATION_SCHEMA.COLUMNS t
+WHERE s.TABLE_SCHEMA = t.TABLE_SCHEMA
+  AND s.TABLE_NAME = t.TABLE_NAME
+  AND s.COLUMN_NAME = t.COLUMN_NAME
+  AND s.TABLE_SCHEMA = ?
+  AND s.TABLE_NAME = ?
+  AND s.KEY_NAME = ?
+ORDER BY s.SEQ_IN_INDEX;
+`, dbName, tableName, index)
 		if err != nil {
 			return nil, err
 		}
-		columnName = append(columnName, fmt.Sprintf("`%s`", escapeString(col)))
-		dataType = append(dataType, dType)
+		defer rows.Close()
+		var col, dType string
+		for rows.Next() {
+			err = rows.Scan(&col, &dType)
+			if err != nil {
+				return nil, err
+			}
+			columnName = append(columnName, fmt.Sprintf("`%s`", escapeString(col)))
+			dataType = append(dataType, dType)
+		}
+	} else {
+		existRowID, err := SelectTiDBRowID(db, dbName, tableName)
+		if err != nil {
+			return nil, errors.Wrap(err, "can't selete tidb row id")
+		}
+		if existRowID {
+			columnName = []string{"_tidb_rowid"}
+			dataType = []string{"int"}
+		} else {
+			pk, err := GetPrimaryKeyName(db, dbName, tableName)
+			if err != nil {
+				return nil, errors.Wrap(err, "can't get pk name")
+			}
+			columnName = []string{pk}
+			dataType = []string{"int"}
+		}
 	}
-	rows.Close()
-	if len(columnName) == 0 {
-		columnName = append(columnName, "_tidb_rowid")
-		dataType = append(dataType, "int")
+	if len(columnName) == 0 || len(dataType) == 0 {
+		return nil, errors.Errorf("can't found index to split chunk, `%s`.`%s`.`%s`", dbName, tableName, index)
 	}
+	log.Debug("found index info", zap.String("index", index), zap.Strings("columnName", columnName), zap.Strings("dataType", dataType))
+
+	lastStartKey := ""
 	field := strings.Join(columnName, ",")
 
 	generateWhereCondition := func(endKey string) {
@@ -427,7 +316,6 @@ func getWhereConditions(ctx context.Context, db *sql.Conn, startKeys []string, c
 			where += fmt.Sprintf("(%s) < (%s)", field, endKey)
 		}
 		lastStartKey = endKey
-		cutoff = 0
 		whereConditions = append(whereConditions, where)
 	}
 	for i := 1; i < len(startKeys); i++ {
@@ -435,30 +323,21 @@ func getWhereConditions(ctx context.Context, db *sql.Conn, startKeys []string, c
 		if err != nil {
 			return nil, err
 		}
-		// omit indexID
-		if len(dataType) == 0 {
+		log.Debug("decode keys", zap.Strings("columnName", columnName), zap.Strings("keys", keys))
+		if len(dataType) != len(keys) {
 			continue
 		}
-		cutoff += counts[i-1]
-		if cutoff >= confRows {
-			if len(dataType) != len(keys) {
-				return nil, errors.Errorf("invalid column names %s and keys %s", columnName, keys)
+		var bf bytes.Buffer
+		for j := range keys {
+			if _, ok := dataTypeStringMap[strings.ToUpper(dataType[j])]; ok {
+				bf.Reset()
+				escape([]byte(keys[j]), &bf, nil)
+				keys[j] = fmt.Sprintf("'%s'", bf.String())
 			}
-			var bf bytes.Buffer
-			for j := range keys {
-				if _, ok := dataTypeStringMap[strings.ToUpper(dataType[j])]; ok {
-					bf.Reset()
-					escape([]byte(keys[j]), &bf, nil)
-					keys[j] = fmt.Sprintf("'%s'", bf.String())
-				}
-			}
-			generateWhereCondition(strings.Join(keys, ","))
 		}
+		generateWhereCondition(strings.Join(keys, ","))
 	}
-	cutoff += counts[len(startKeys)-1]
-	if cutoff > 0 {
-		generateWhereCondition("")
-	}
+	generateWhereCondition("")
 	return whereConditions, nil
 }
 

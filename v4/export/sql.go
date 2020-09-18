@@ -713,10 +713,35 @@ func getRowId(s string) string {
 	return ""
 }
 
-func getTableRegionInfo(ctx context.Context, db *sql.Conn, schema, table string) (startKeys []string, counts []uint64, err error) {
+const PRIMARY = "PRIMARY"
+const ROW_ID_IDX = "@@__table_row_id"
+
+func getTableRegionInfo(ctx context.Context, db *sql.Conn, schema, table, index string) (startKeys []string, counts []uint64, err error) {
 	startKeys = make([]string, 0)
 	counts = make([]uint64, 0)
-	rows, err := db.QueryContext(ctx, "SELECT START_KEY, APPROXIMATE_KEYS from INFORMATION_SCHEMA.TIKV_REGION_STATUS s, INFORMATION_SCHEMA.TABLES t WHERE s.TABLE_ID = t.TIDB_TABLE_ID AND t.TABLE_SCHEMA = ? AND t.TABLE_NAME = ? AND IS_INDEX = 0 ORDER BY START_KEY;", schema, table)
+	var rows *sql.Rows
+	if index == ROW_ID_IDX {
+		sql := `
+SELECT START_KEY, APPROXIMATE_KEYS
+FROM INFORMATION_SCHEMA.TIKV_REGION_STATUS
+where DB_NAME = ?
+  AND TABLE_NAME = ?
+  AND IS_INDEX = 0
+ORDER BY START_KEY;
+`
+		rows, err = db.QueryContext(ctx, sql, schema, table)
+	} else {
+		sql := `
+SELECT START_KEY, APPROXIMATE_KEYS
+FROM INFORMATION_SCHEMA.TIKV_REGION_STATUS
+where DB_NAME = ?
+  AND TABLE_NAME = ?
+  AND INDEX_NAME = ?
+  AND IS_INDEX = 1
+ORDER BY START_KEY;
+`
+		rows, err = db.QueryContext(ctx, sql, schema, table, index)
+	}
 	if err != nil {
 		return
 	}
@@ -733,6 +758,9 @@ func getTableRegionInfo(ctx context.Context, db *sql.Conn, schema, table string)
 
 		startKeys = append(startKeys, startKey)
 		counts = append(counts, count)
+	}
+	if len(startKeys) == 0 {
+		err = errors.Errorf("can't get region info, `%s`.`%s`.`%s`", schema, table, index)
 	}
 	return
 }
