@@ -143,10 +143,7 @@ func SelectAllFromTable(conf *Config, db *sql.Conn, database, table string) (Tab
 		return nil, err
 	}
 
-	orderByClause, err := buildOrderByClause(conf, db, database, table)
-	if err != nil {
-		return nil, err
-	}
+	orderByClause := ""
 
 	query := buildSelectQuery(database, table, selectedField, buildWhereCondition(conf, ""), orderByClause)
 
@@ -216,28 +213,10 @@ func buildSelectQuery(database, table string, fields string, where string, order
 	return query.String()
 }
 
-func buildOrderByClause(conf *Config, db *sql.Conn, database, table string) (string, error) {
-	if !conf.SortByPk {
-		return "", nil
-	}
-	if conf.ServerInfo.ServerType == ServerTypeTiDB {
-		ok, err := SelectTiDBRowID(db, database, table)
-		if err != nil {
-			return "", withStack(err)
-		}
-		if ok {
-			return "ORDER BY _tidb_rowid", nil
-		} else {
-			return "", nil
-		}
-	}
-	pkName, err := GetPrimaryKeyName(db, database, table)
-	if err != nil {
-		return "", withStack(err)
-	}
-	tableContainsPriKey := pkName != ""
-	if tableContainsPriKey {
-		return fmt.Sprintf("ORDER BY `%s`", escapeString(pkName)), nil
+func buildOrderByClause(conf *Config, columns []string) (string, error) {
+	if conf.DoSort {
+		field := strings.Join(columns, ",")
+		return fmt.Sprintf("ORDER BY %s", field), nil
 	}
 	return "", nil
 }

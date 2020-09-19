@@ -193,6 +193,7 @@ func splitTableDataIntoChunksByRegion(
 		errCh <- errors.WithMessage(err, "fail to decodeStartKey")
 		return
 	}
+	originColumns := columnNames
 	if len(keys) < 1 || conf.RegionLimit <= 1 {
 		linear <- struct{}{}
 		return
@@ -226,7 +227,7 @@ func splitTableDataIntoChunksByRegion(
 		errCh <- withStack(err)
 		return
 	}
-	orderByClause, err := buildOrderByClause(conf, db, dbName, tableName)
+	orderByClause, err := buildOrderByClause(conf, originColumns)
 	if err != nil {
 		errCh <- withStack(err)
 		return

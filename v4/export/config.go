@@ -69,6 +69,7 @@ type Config struct {
 	RowsLimit       uint64
 	RegionLimit     uint64
 	ColumnKeysLimit bool
+	DoSort          bool
 }
 
 func DefaultConfig() *Config {
