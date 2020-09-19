@@ -108,7 +108,7 @@ func DecodeKey(key string, dataType []string, unsigned []bool) ([]string, error)
 		}
 		return keys, nil
 	default:
-		panic("unreachable")
+		return nil, errors.New("invalid key")
 	}
 }
 

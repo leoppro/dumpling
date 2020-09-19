@@ -188,18 +188,25 @@ func splitTableDataIntoChunksByRegion(
 	}
 	log.Debug("getTableRegionInfo", zap.Strings("startKeys", startKeys), zap.Uint64s("counts", estimatedCounts))
 
-	whereConditions, err := getWhereConditions(ctx, db, startKeys, estimatedCounts, dbName, tableName, index)
+	columnNames, _, _, keys, err := decodeStartKey(ctx, db, startKeys, dbName, tableName, index)
+	if err != nil {
+		errCh <- errors.WithMessage(err, "fail to decodeStartKey")
+		return
+	}
+	if len(keys) < 1 || conf.RegionLimit <= 1 {
+		linear <- struct{}{}
+		return
+	}
+
+	keys = keysLimiter(keys, conf.RegionLimit)
+
+	whereConditions, err := getWhereConditions(columnNames, keys)
 	if err != nil {
 		errCh <- errors.WithMessage(err, "fail to generate whereConditions")
 		return
 	}
 	for _, whereCondition := range whereConditions {
 		log.Debug("getWhereConditions", zap.String("whereCondition", whereCondition))
-	}
-
-	if len(whereConditions) <= 1 {
-		linear <- struct{}{}
-		return
 	}
 
 	selectedField, err := buildSelectField(db, dbName, tableName, conf.CompleteInsert)
@@ -246,13 +253,16 @@ LOOP:
 	close(tableDataIRCh)
 }
 
-func getWhereConditions(ctx context.Context, db *sql.Conn, startKeys []string, counts []uint64, dbName, tableName, index string) ([]string, error) {
-	whereConditions := make([]string, 0)
-	var (
-		columnName   []string
-		dataType     []string
-		dataUnsigned []bool
-	)
+func decodeStartKey(
+	ctx context.Context,
+	db *sql.Conn,
+	startKeys []string,
+	dbName, tableName, index string) (
+	columnName []string,
+	dataType []string,
+	dataUnsigned []bool,
+	keys [][]string,
+	err error) {
 	if index != ROW_ID_IDX {
 		rows, err := db.QueryContext(ctx,
 			`
@@ -268,7 +278,7 @@ WHERE s.TABLE_SCHEMA = t.TABLE_SCHEMA
 ORDER BY s.SEQ_IN_INDEX;
 `, dbName, tableName, index)
 		if err != nil {
-			return nil, err
+			return nil, nil, nil, nil, err
 		}
 		defer rows.Close()
 		var col, dType string
@@ -276,7 +286,7 @@ ORDER BY s.SEQ_IN_INDEX;
 		for rows.Next() {
 			err = rows.Scan(&col, &dType, &dUnsigned)
 			if err != nil {
-				return nil, err
+				return nil, nil, nil, nil, err
 			}
 			columnName = append(columnName, fmt.Sprintf("`%s`", escapeString(col)))
 			dataType = append(dataType, dType)
@@ -285,7 +295,7 @@ ORDER BY s.SEQ_IN_INDEX;
 	} else {
 		existRowID, err := SelectTiDBRowID(db, dbName, tableName)
 		if err != nil {
-			return nil, errors.Wrap(err, "can't selete tidb row id")
+			return nil, nil, nil, nil, errors.Wrap(err, "can't selete tidb row id")
 		}
 		if existRowID {
 			columnName = []string{"_tidb_rowid"}
@@ -294,7 +304,7 @@ ORDER BY s.SEQ_IN_INDEX;
 		} else {
 			pk, err := GetPrimaryKeyName(db, dbName, tableName)
 			if err != nil {
-				return nil, errors.Wrap(err, "can't get pk name")
+				return nil, nil, nil, nil, errors.Wrap(err, "can't get pk name")
 			}
 			columnName = []string{pk}
 			dataType = []string{"int"}
@@ -308,7 +318,7 @@ AND t.COLUMN_NAME = ?;
 			rows, err := db.QueryContext(ctx, sql, dbName, tableName, pk)
 
 			if err != nil {
-				return nil, err
+				return nil, nil, nil, nil, err
 			}
 			defer rows.Close()
 
@@ -317,20 +327,56 @@ AND t.COLUMN_NAME = ?;
 			for rows.Next() {
 				err = rows.Scan(&dUnsigned)
 				if err != nil {
-					return nil, err
+					return nil, nil, nil, nil, err
 				}
 				rowsLen++
 			}
 			if rowsLen != 1 {
-				return nil, errors.Errorf("error to get type of primary key %s.%s.%s", dbName, tableName, pk)
+				return nil, nil, nil, nil, errors.Errorf("error to get type of primary key %s.%s.%s", dbName, tableName, pk)
 			}
 			dataUnsigned = []bool{dUnsigned}
 		}
 	}
 	if len(columnName) == 0 || len(dataType) == 0 {
-		return nil, errors.Errorf("can't found index to split chunk, `%s`.`%s`.`%s`", dbName, tableName, index)
+		return nil, nil, nil, nil, errors.Errorf("can't found index to split chunk, `%s`.`%s`.`%s`", dbName, tableName, index)
 	}
 	log.Debug("found index info", zap.String("index", index), zap.Strings("columnName", columnName), zap.Strings("dataType", dataType), zap.Bools("unsigned", dataUnsigned))
+
+	for i := 0; i < len(startKeys); i++ {
+		key, err := DecodeKey(startKeys[i], dataType, dataUnsigned)
+		if err != nil {
+			log.Warn("failed to decode key", zap.Error(err), zap.String("table", tableName), zap.String("index", index))
+			continue
+		}
+		if len(key) < len(dataType) {
+			log.Warn("invalid index key", zap.Error(err), zap.String("table", tableName), zap.String("index", index))
+			continue
+		}
+		if len(key) > len(dataType) {
+			key = key[:len(dataType)]
+		}
+		log.Debug("decode keys", zap.Strings("columnName", columnName), zap.Strings("keys", key))
+		keys = append(keys, key)
+	}
+	return
+}
+
+func keysLimiter(keys [][]string, fileLimit uint64) [][]string {
+	keysLen := uint64(len(keys))
+	if fileLimit == UnspecifiedSize || keysLen < fileLimit {
+		return keys
+	}
+	limit := fileLimit - 1
+	step := keysLen / limit
+	newKeys := make([][]string, limit)
+	for i := 0; i < int(limit); i++ {
+		newKeys[i] = keys[i*int(step)+(int(step)/2)]
+	}
+	return newKeys
+}
+
+func getWhereConditions(columnName []string, keys [][]string) ([]string, error) {
+	whereConditions := make([]string, 0)
 
 	lastStartKey := ""
 	field := strings.Join(columnName, ",")
@@ -349,17 +395,8 @@ AND t.COLUMN_NAME = ?;
 		lastStartKey = endKey
 		whereConditions = append(whereConditions, where)
 	}
-	for i := 1; i < len(startKeys); i++ {
-		keys, err := DecodeKey(startKeys[i], dataType, dataUnsigned)
-		if err != nil {
-			return nil, err
-		}
-		log.Debug("decode keys", zap.Strings("columnName", columnName), zap.Strings("keys", keys))
-		if len(dataType) > len(keys) {
-			continue
-		}
-		keys = keys[:len(dataType)]
-		generateWhereCondition(strings.Join(keys, ","))
+	for i := 0; i < len(keys); i++ {
+		generateWhereCondition(strings.Join(keys[i], ","))
 	}
 	generateWhereCondition("")
 	return whereConditions, nil

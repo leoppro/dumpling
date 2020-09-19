@@ -27,7 +27,8 @@ func (s *testDumpSuite) TestDump(c *C) {
 		CsvSeparator:  ",",
 		CsvDelimiter:  "",
 		NoHeader:      true,
-		RowsLimit:     100000,
+		RowsLimit:     0,
+		RegionLimit:   10,
 	})
 	c.Assert(err, IsNil)
 }
