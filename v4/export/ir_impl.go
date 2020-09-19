@@ -342,7 +342,7 @@ AND t.COLUMN_NAME = ?;
 	}
 	log.Debug("found index info", zap.String("index", index), zap.Strings("columnName", columnName), zap.Strings("dataType", dataType), zap.Bools("unsigned", dataUnsigned))
 
-	for i := 0; i < len(startKeys); i++ {
+	for i := 1; i < len(startKeys); i++ {
 		key, err := DecodeKey(startKeys[i], dataType, dataUnsigned)
 		if err != nil {
 			log.Warn("failed to decode key", zap.Error(err), zap.String("table", tableName), zap.String("index", index))

@@ -7,11 +7,13 @@ import (
 	"fmt"
 	"github.com/pingcap/dumpling/v4/log"
 	"github.com/pingcap/errors"
+	"github.com/pingcap/parser/mysql"
 	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util/codec"
 	"go.uber.org/zap"
 	"strconv"
 	"strings"
+	"time"
 )
 
 var (
@@ -104,7 +106,10 @@ func DecodeKey(key string, dataType []string, unsigned []bool) ([]string, error)
 		}
 		keys := make([]string, len(indexValue))
 		for i, v := range indexValue {
-			keys[i] = datum2String(v, dataType[i], unsigned[i])
+			keys[i], err = datum2String(v, dataType[i], unsigned[i])
+			if err != nil {
+				return nil, errors.Trace(err)
+			}
 		}
 		return keys, nil
 	default:
@@ -136,45 +141,77 @@ func decodeRecordID(key []byte) (rest []byte, recordID int64, err error) {
 	return
 }
 
-func datum2String(d types.Datum, dataType string, unsigned bool) string {
+func time2String(d types.Datum, tp byte) (string, error) {
+	t := types.NewTime(types.ZeroCoreTime, tp, types.MaxFsp)
+	var err error
+	err = t.FromPackedUint(d.GetUint64())
+	if err != nil {
+		return "", errors.New("unflatten datume data")
+	}
+	d.SetUint64(0)
+	d.SetMysqlTime(t)
+	return "'" + d.GetMysqlTime().String() + "'", nil
+}
+
+func datum2String(d types.Datum, dataType string, unsigned bool) (string, error) {
+	switch strings.ToUpper(dataType) {
+	case "DATE":
+		return time2String(d, mysql.TypeDate)
+	case "DATETIME":
+		return time2String(d, mysql.TypeDatetime)
+	case "TIMESTAMP":
+		t := types.NewTime(types.ZeroCoreTime, mysql.TypeTimestamp, types.MaxFsp)
+		var err error
+		err = t.FromPackedUint(d.GetUint64())
+		if err != nil {
+			return "", errors.New("unflatten datume data")
+		}
+		d.SetUint64(0)
+		d.SetMysqlTime(t)
+		got, err := t.GoTime(time.UTC)
+		if err != nil {
+			return "", errors.Trace(err)
+		}
+		ts := got.UnixNano()
+		tsStr := strconv.FormatInt(ts, 10)
+		tsStr = tsStr[len(tsStr)-9:]
+		return fmt.Sprintf("FROM_UNIXTIME('%d.%s')", ts/1e9, tsStr), nil
+	}
 	switch d.Kind() {
 	case types.KindNull:
-		return "NULL"
+		return "NULL", nil
 	case types.KindInt64:
-		return strconv.FormatInt(d.GetInt64(), 10)
+		return strconv.FormatInt(d.GetInt64(), 10), nil
 	case types.KindUint64:
-		switch dataType {
-
-		}
-		return strconv.FormatUint(d.GetUint64(), 10)
+		return strconv.FormatUint(d.GetUint64(), 10), nil
 	case types.KindFloat32, types.KindFloat64:
-		return strconv.FormatFloat(d.GetFloat64(), 'G', -1, 64)
+		return strconv.FormatFloat(d.GetFloat64(), 'G', -1, 64), nil
 	case types.KindString:
-		return d.GetString()
+		return d.GetString(), nil
 	case types.KindBytes:
 		b := d.GetBytes()
-		return fmt.Sprintf("x'%s'", hex.EncodeToString(b))
+		return fmt.Sprintf("x'%s'", hex.EncodeToString(b)), nil
 	case types.KindMysqlDecimal:
 		v := d.GetMysqlDecimal()
 		if v == nil {
-			return "NULL"
+			return "NULL", nil
 		}
-		return v.String()
+		return v.String(), nil
 	case types.KindMysqlDuration:
-		return d.GetMysqlDuration().String()
+		return "'" + d.GetMysqlDuration().String() + "'", nil
 	case types.KindMysqlEnum:
-		return strconv.FormatUint(d.GetMysqlEnum().Value, 10)
+		return strconv.FormatUint(d.GetMysqlEnum().Value, 10), nil
 	case types.KindBinaryLiteral, types.KindMysqlBit:
 		v, _ := d.GetBinaryLiteral().ToInt(nil)
-		return strconv.FormatUint(v, 10)
+		return strconv.FormatUint(v, 10), nil
 	case types.KindMysqlSet:
-		return strconv.FormatUint(d.GetMysqlSet().Value, 10)
+		return strconv.FormatUint(d.GetMysqlSet().Value, 10), nil
 	case types.KindMysqlJSON:
-		return d.GetMysqlJSON().String()
+		return d.GetMysqlJSON().String(), nil
 	case types.KindMysqlTime:
-		return d.GetMysqlTime().String()
+		return d.GetMysqlTime().String(), nil
 	default:
-		return fmt.Sprintf("%s", d.GetInterface())
+		return fmt.Sprintf("%s", d.GetInterface()), nil
 	}
 }
 
