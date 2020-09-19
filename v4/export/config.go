@@ -68,6 +68,7 @@ type Config struct {
 	IndexName       string
 	RowsLimit       uint64
 	RegionLimit     uint64
+	ColumnKeysLimit bool
 }
 
 func DefaultConfig() *Config {

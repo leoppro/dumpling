@@ -154,6 +154,9 @@ func time2String(d types.Datum, tp byte) (string, error) {
 }
 
 func datum2String(d types.Datum, dataType string, unsigned bool) (string, error) {
+	if d.IsNull() {
+		return "", errors.Errorf("keys cannot be null")
+	}
 	switch strings.ToUpper(dataType) {
 	case "DATE":
 		return time2String(d, mysql.TypeDate)
@@ -178,8 +181,6 @@ func datum2String(d types.Datum, dataType string, unsigned bool) (string, error)
 		return fmt.Sprintf("FROM_UNIXTIME('%d.%s')", ts/1e9, tsStr), nil
 	}
 	switch d.Kind() {
-	case types.KindNull:
-		return "NULL", nil
 	case types.KindInt64:
 		return strconv.FormatInt(d.GetInt64(), 10), nil
 	case types.KindUint64:

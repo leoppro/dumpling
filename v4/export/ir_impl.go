@@ -199,6 +199,12 @@ func splitTableDataIntoChunksByRegion(
 	}
 
 	keys = keysLimiter(keys, conf.RegionLimit)
+	if conf.ColumnKeysLimit {
+		columnNames = columnNames[:1]
+		for i, key := range keys {
+			keys[i] = key[:1]
+		}
+	}
 
 	whereConditions, err := getWhereConditions(columnNames, keys)
 	if err != nil {
@@ -231,7 +237,7 @@ LOOP:
 	for _, whereCondition := range whereConditions {
 		chunkIndex += 1
 		query := buildSelectQuery(dbName, tableName, selectedField, buildWhereCondition(conf, whereCondition), orderByClause)
-
+		log.Debug("show query", zap.String("query", query))
 		td := &tableData{
 			database:        dbName,
 			table:           tableName,
