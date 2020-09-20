@@ -13,7 +13,7 @@ require (
 	github.com/pingcap/errors v0.11.5-0.20200729012136-4e113ddee29e
 	github.com/pingcap/failpoint v0.0.0-20200702092429-9f69995143ce
 	github.com/pingcap/log v0.0.0-20200828042413-fce0951f1463
-	github.com/pingcap/parser v0.0.0-20200911054040-258297116c4b
+	github.com/pingcap/parser v0.0.0-20200821073936-cf85e80665c4
 	github.com/pingcap/tidb v1.1.0-beta.0.20200831085451-438945d2948e
 	github.com/pingcap/tidb-tools v4.0.6-0.20200828085514-03575b185007+incompatible
 	github.com/pkg/errors v0.9.1
