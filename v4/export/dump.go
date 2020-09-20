@@ -226,7 +226,7 @@ func Dump(pCtx context.Context, conf *Config) (err error) {
 			if err != nil {
 				return err
 			}
-			return writer.WriteTableData(ctx, tableIR)
+			return writer.WriteTableData(ctx, tableIR, conf)
 		})
 	}
 
@@ -269,7 +269,7 @@ func dumpSql(ctx context.Context, conf *Config, connectPool *connectionsPool, wr
 		return err
 	}
 
-	return writer.WriteTableData(ctx, tableIR)
+	return writer.WriteTableData(ctx, tableIR, nil)
 }
 
 func dumpTable(ctx context.Context, conf *Config, db *sql.Conn, dbName string, table *TableInfo, index string, writer Writer) ([]TableDataIR, error) {

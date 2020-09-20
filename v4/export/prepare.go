@@ -20,7 +20,7 @@ const (
 
 	defaultOutputFileTemplateBase = `
 		{{- define "objectName" -}}
-			{{fn .DB}}.{{fn .Table}}
+			{{fn .Prefix}}{{fn .DB}}.{{fn .Table}}
 		{{- end -}}
 		{{- define "schema" -}}
 			{{fn .DB}}-schema-create

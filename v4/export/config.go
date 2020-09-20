@@ -70,6 +70,7 @@ type Config struct {
 	RegionLimit     uint64
 	ColumnKeysLimit bool
 	DoSort          bool
+	Prefix          string
 }
 
 func DefaultConfig() *Config {

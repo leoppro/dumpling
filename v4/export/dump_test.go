@@ -31,6 +31,7 @@ func (s *testDumpSuite) TestDump(c *C) {
 		RegionLimit:     10,
 		ColumnKeysLimit: false,
 		DoSort:          true,
+		Prefix:          "aabbcc",
 	})
 	c.Assert(err, IsNil)
 }

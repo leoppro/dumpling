@@ -82,7 +82,7 @@ func (s *testDumpSuite) TestWriteTableData(c *C) {
 		"/*!40014 SET FOREIGN_KEY_CHECKS=0*/;",
 	}
 	tableIR := newMockTableIR("test", "employee", data, specCmts, colTypes)
-	err = writer.WriteTableData(ctx, tableIR)
+	err = writer.WriteTableData(ctx, tableIR, nil)
 	c.Assert(err, IsNil)
 
 	p := path.Join(dir, "test.employee.0.sql")
@@ -130,7 +130,7 @@ func (s *testDumpSuite) TestWriteTableDataWithFileSize(c *C) {
 	}
 	colTypes := []string{"INT", "SET", "VARCHAR", "VARCHAR", "TEXT"}
 	tableIR := newMockTableIR("test", "employee", data, specCmts, colTypes)
-	err = writer.WriteTableData(ctx, tableIR)
+	err = writer.WriteTableData(ctx, tableIR, nil)
 	c.Assert(err, IsNil)
 
 	cases := map[string]string{
@@ -185,7 +185,7 @@ func (s *testDumpSuite) TestWriteTableDataWithStatementSize(c *C) {
 		"/*!40014 SET FOREIGN_KEY_CHECKS=0*/;",
 	}
 	tableIR := newMockTableIR("te%/st", "employee", data, specCmts, colTypes)
-	err = writer.WriteTableData(ctx, tableIR)
+	err = writer.WriteTableData(ctx, tableIR, nil)
 	c.Assert(err, IsNil)
 
 	// only with statement size
@@ -238,7 +238,7 @@ func (s *testDumpSuite) TestWriteTableDataWithStatementSize(c *C) {
 	}
 
 	tableIR = newMockTableIR("te%/st", "employee", data, specCmts, colTypes)
-	c.Assert(writer.WriteTableData(ctx, tableIR), IsNil)
+	c.Assert(writer.WriteTableData(ctx, tableIR, nil), IsNil)
 	c.Assert(err, IsNil)
 	for p, expected := range cases {
 		p := path.Join(config.OutputDirPath, p)
