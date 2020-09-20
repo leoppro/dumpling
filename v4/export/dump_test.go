@@ -32,6 +32,7 @@ func (s *testDumpSuite) TestDump(c *C) {
 		ColumnKeysLimit: false,
 		DoSort:          true,
 		Prefix:          "aabbcc",
+		Where:           "ol_o_id % 2 = 0",
 	})
 	c.Assert(err, IsNil)
 }
